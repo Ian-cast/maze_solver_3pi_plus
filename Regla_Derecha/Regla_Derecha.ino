@@ -1,16 +1,22 @@
 #include <Wire.h>
 #include <VL53L0X.h>
 
-// Set to 1 to only print encoder counts (for checking/calibrating), 0 to run the maze
-#define ENCODER_TEST 1
+struct PIDState {
+  float integ = 0;
+  long  prevPos = 0;
+  float velF = 0;
+};
 
-// ---------- Motor pins ----------
+// ---------- Pines de motores ----------
 const int R_PWM = 14, R_DIR = 10;
 const int L_PWM = 15, L_DIR = 11;
 
-// ---------- Encoder pins ----------
+// ---------- Pines de encoders ----------
 const int R_A = 8,  R_B = 9;
 const int L_A = 12, L_B = 13;
+
+// ---------- Boton A (GP25, comparte pin con el LED amarillo) ----------
+const int BTN_A = 25;
 
 volatile long cntL = 0, cntR = 0;
 volatile uint8_t prevL = 0, prevR = 0;
@@ -27,47 +33,83 @@ void isrR() {
   prevR = s;
 }
 
-void resetCounts() {
-  noInterrupts(); cntL = 0; cntR = 0; interrupts();
-}
-long absL() { noInterrupts(); long v = labs(cntL); interrupts(); return v; }
-long absR() { noInterrupts(); long v = labs(cntR); interrupts(); return v; }
+void resetCounts() { noInterrupts(); cntL = 0; cntR = 0; interrupts(); }
+long getL() { noInterrupts(); long v = cntL; interrupts(); return v; }
+long getR() { noInterrupts(); long v = cntR; interrupts(); return v; }
 
-// ---------- Robot geometry (approximate: check and calibrate!) ----------
-const float CPR      = 180;   // counts per wheel revolution (12 x 29.86 for 30:1 motors)
-const float WHEEL_MM = 32.0;    // wheel diameter
-const float TRACK_MM = 96.0;    // distance between wheels
-const float TURN_FUDGE = 1.0;   // multiply to correct under/over-turning
+// =====================================================
+//  GEOMETRIA (calibrada)
+// =====================================================
+const int ENC_SIGN_L = 1;
+const int ENC_SIGN_R = 1;
+
+const float CPR        = 182.0;
+const float WHEEL_MM   = 32.0;
+const float TRACK_MM   = 86.0;
+const float TURN_FUDGE = 0.96;
 
 const float COUNTS_PER_MM = CPR / (PI * WHEEL_MM);
-const long  COUNTS_90  = (long)(CPR * TRACK_MM / (4.0 * WHEEL_MM) * TURN_FUDGE);
-const long  COUNTS_180 = COUNTS_90 * 2;
 
-// ---------- Sensors ----------
+// =====================================================
+//  PID DE GIRO
+// =====================================================
+const float KP = 2.0;
+const float KI = 0.0;
+const float KD = 0.05;
+
+const int MAX_PWM = 100;
+const int MIN_PWM = 45;
+const int TOL     = 2;
+
+const int   SETTLE_MS  = 150;
+const int   TIMEOUT_MS = 3000;
+const int   I_ZONE     = 15;
+const float I_MAX      = 15.0;
+const unsigned long DT_US = 10000;
+
+// =====================================================
+//  PARAMETROS DEL LABERINTO
+// =====================================================
+const float GIRO_GRADOS = 90.0;    // giro lateral
+const float GIRO_VUELTA = 180.0;   // callejon sin salida
+
+const int   BASE_SPEED = 80;       // velocidad al avanzar (0-255)
+const float KP_WALL    = 0.0;      // correccion con paredes (sube a 0.2 cuando el frenado este bien)
+const float KP_SYNC    = 2.0;      // correccion con encoders (sin paredes)
+const int   CORR_MAX   = 30;       // limite de correccion (PWM)
+const int   DEADBAND   = 3;        // zona muerta de la correccion (mm)
+
+const int REF_SIDE   = 110;        // distancia a UNA pared estando centrado (mm)
+const int FRONT_STOP = 100;        // frente a menos de esto = cerrado (mm)
+const int OPEN_SIDE  = 160;        // lado a mas de esto = abertura (mm)
+
+// Frenado al acercarse a una pared de frente
+const int SLOW_DIST      = 250;    // empieza a frenar a esta distancia (mm)
+const int APPROACH_SPEED = 55;     // velocidad minima al acercarse (debe superar la zona muerta)
+const int FRONT_TURN_MIN = 70;     // si el frente esta a menos de esto antes de girar, retrocede (mm)
+
+const int STEP_MM      = 20;       // avance por ciclo de decision
+const int ADVANCE_MM   = 20;       // avance antes de girar en una abertura
+const int ENTER_MM     = 30;       // avance despues de girar
+const int MIN_MM_ENTRE_GIROS = 60; // distancia minima entre giros a la derecha
+
+const bool DEBUG = true;
+
+// ---------- Sensores ----------
 const uint8_t MUX_ADDR = 0x70;
 const uint8_t N = 5;
-enum { S_LEFT = 0, S_FL = 1, S_FRONT = 2, S_FR = 3, S_RIGHT = 4 };
+enum { S_LEFT = 4, S_FL = 3, S_FRONT = 2, S_FR = 1, S_RIGHT = 0 };
 VL53L0X sensor[N];
 uint16_t d[N];
 
-// ---------- Tunable settings ----------
-const int   BASE_SPEED   = 90;
-const float KP           = 0.5;
-const int   TARGET_RIGHT = 60;
-const int   FRONT_STOP   = 80;
-const int   OPEN_SIDE    = 150;
-
-const int   TURN_SPEED     = 100;
-const int   MIN_TURN_SPEED = 60;   // slow speed near the end of a turn
-const int   ADVANCE_MM     = 20;   // forward before turning at an opening
-const int   ENTER_MM       = 30;   // forward after turning
-const int   COOLDOWN_MS    = 500;
-const float KP_STRAIGHT    = 2.0;  // keeps both wheels at the same count
-
-unsigned long lastTurn = 0;
+// ---------- Estado ----------
+float mmDesdeGiro = 0;
+int   lastCorr = 0;
 unsigned long lastPrint = 0;
 
-// ---------- Multiplexer ----------
+// =====================================================
+//  MULTIPLEXOR Y SENSORES
+// =====================================================
 void canal(uint8_t ch) {
   Wire.beginTransmission(MUX_ADDR);
   Wire.write(1 << ch);
@@ -78,11 +120,13 @@ void readSensors() {
   for (uint8_t i = 0; i < N; i++) {
     canal(i);
     uint16_t mm = sensor[i].readRangeContinuousMillimeters();
-    if (!sensor[i].timeoutOccurred()) d[i] = mm;
+    if (!sensor[i].timeoutOccurred()) d[i] = mm;   // si hay timeout, conserva el valor anterior
   }
 }
 
-// ---------- Motors: -255..255, positive = forward ----------
+// =====================================================
+//  MOTORES
+// =====================================================
 void setMotors(int left, int right) {
   left  = constrain(left,  -255, 255);
   right = constrain(right, -255, 255);
@@ -94,49 +138,208 @@ void setMotors(int left, int right) {
 
 void stopMotors() { setMotors(0, 0); }
 
-// ---------- Encoder-based moves ----------
-void forwardMm(int mm) {
-  long target = (long)(mm * COUNTS_PER_MM);
-  resetCounts();
-  unsigned long t0 = millis();
-  while (millis() - t0 < 3000) {
-    long l = absL(), r = absR();
-    if ((l + r) / 2 >= target) break;
-    int err = (int)(l - r);   // left ahead -> slow left, speed up right
-    setMotors(BASE_SPEED - (int)(KP_STRAIGHT * err),
-              BASE_SPEED + (int)(KP_STRAIGHT * err));
+// =====================================================
+//  PID Y GIROS
+// =====================================================
+int pidStep(PIDState &s, long target, long pos, float dt) {
+  long e = target - pos;
+
+  float vel = (pos - s.prevPos) / dt;
+  s.prevPos = pos;
+  s.velF = 0.7f * s.velF + 0.3f * vel;
+
+  if (labs(e) <= I_ZONE) {
+    s.integ += e * dt;
+    s.integ = constrain(s.integ, -I_MAX, I_MAX);
+  } else {
+    s.integ = 0;
   }
-  stopMotors();
+
+  if (labs(e) <= TOL) return 0;
+
+  float u = KP * e + KI * s.integ - KD * s.velF;
+  u = constrain(u, -MAX_PWM, MAX_PWM);
+
+  if (fabs(u) < MIN_PWM) u = (u >= 0) ? MIN_PWM : -MIN_PWM;
+  return (int)u;
 }
 
-void turnCounts(bool toRight, long target) {
+long objetivoCuentas(float grados) {
+  return lroundf(CPR * TRACK_MM * fabsf(grados) / (360.0f * WHEEL_MM) * TURN_FUDGE);
+}
+
+bool turnPID(bool toRight, long target) {
   stopMotors();
-  delay(50);
+  delay(100);
   resetCounts();
-  int sgn = toRight ? 1 : -1;       // right turn: left wheel forward, right wheel back
+
+  long tgtL = toRight ?  target : -target;
+  long tgtR = toRight ? -target :  target;
+
+  PIDState sL, sR;
   unsigned long t0 = millis();
-  while (millis() - t0 < 2500) {
-    long l = absL(), r = absR();
-    if (l >= target && r >= target) break;
-    int sl = 0, sr = 0;
-    if (l < target) sl = (target - l > 30) ? TURN_SPEED : MIN_TURN_SPEED;
-    if (r < target) sr = (target - r > 30) ? TURN_SPEED : MIN_TURN_SPEED;
-    setMotors(sgn * sl, -sgn * sr);
+  unsigned long tLast = micros();
+  unsigned long settleStart = 0;
+  bool done = false;
+
+  while (millis() - t0 < TIMEOUT_MS) {
+    unsigned long now = micros();
+    if (now - tLast < DT_US) continue;
+    float dt = (now - tLast) / 1e6f;
+    tLast = now;
+
+    long posL = ENC_SIGN_L * getL();
+    long posR = ENC_SIGN_R * getR();
+
+    int uL = pidStep(sL, tgtL, posL, dt);
+    int uR = pidStep(sR, tgtR, posR, dt);
+    setMotors(uL, uR);
+
+    if (labs(tgtL - posL) <= TOL && labs(tgtR - posR) <= TOL) {
+      if (settleStart == 0) settleStart = millis();
+      if (millis() - settleStart >= SETTLE_MS) { done = true; break; }
+    } else {
+      settleStart = 0;
+    }
   }
   stopMotors();
+  delay(250);
+
+  if (DEBUG) {
+    Serial.print("  giro objetivo=");  Serial.print(target);
+    Serial.print("  final L=");        Serial.print(abs(ENC_SIGN_L * getL()));
+    Serial.print(" R=");               Serial.print(abs(ENC_SIGN_R * getR()));
+    Serial.println(done ? "  OK" : "  TIMEOUT");
+  }
+  return done;
+}
+
+// grados positivos = derecha, negativos = izquierda
+void girar(float grados) {
+  bool derecha = (grados >= 0);
+  turnPID(derecha, objetivoCuentas(grados));
   delay(50);
   readSensors();
   readSensors();
-  lastTurn = millis();
+  mmDesdeGiro = 0;
 }
 
-void followRightWall() {
-  int right = constrain((int)d[S_RIGHT], 0, TARGET_RIGHT * 2);
-  float error = right - TARGET_RIGHT;
-  int correction = (int)(KP * error);
-  setMotors(BASE_SPEED + correction, BASE_SPEED - correction);
+// =====================================================
+//  AVANCE RECTO
+// =====================================================
+// Devuelve la correccion de direccion (positivo = girar a la derecha).
+//  - Dos paredes: iguala las distancias (sin referencias).
+//  - Una pared: mantiene REF_SIDE.
+//  - Sin paredes: va recto con los encoders.
+int correccionLateral(long errEnc) {
+  bool paredD = d[S_RIGHT] < OPEN_SIDE;
+  bool paredI = d[S_LEFT]  < OPEN_SIDE;
+  int corr;
+
+  if (paredD && paredI) {
+    // positivo = mas espacio a la derecha -> girar a la derecha
+    int e = ((int)d[S_RIGHT] - (int)d[S_LEFT]) / 2;
+    e = constrain(e, -40, 40);
+    if (abs(e) <= DEADBAND) e = 0;
+    corr = (int)(KP_WALL * e);
+  } else if (paredD) {
+    int e = constrain((int)d[S_RIGHT] - REF_SIDE, -40, 40);   // positivo = lejos de la derecha
+    if (abs(e) <= DEADBAND) e = 0;
+    corr = (int)(KP_WALL * e);
+  } else if (paredI) {
+    int e = constrain((int)d[S_LEFT] - REF_SIDE, -40, 40);    // positivo = lejos de la izquierda
+    if (abs(e) <= DEADBAND) e = 0;
+    corr = -(int)(KP_WALL * e);
+  } else {
+    corr = -(int)(KP_SYNC * errEnc);   // izquierda adelantada -> frena la izquierda
+  }
+
+  lastCorr = constrain(corr, -CORR_MAX, CORR_MAX);
+  return lastCorr;
 }
 
+// Reduce la velocidad al acercarse a una pared de frente
+int velocidadAvance() {
+  int f = (int)d[S_FRONT];
+  if (f >= SLOW_DIST)  return BASE_SPEED;
+  if (f <= FRONT_STOP) return APPROACH_SPEED;
+  return (int)map(f, FRONT_STOP, SLOW_DIST, APPROACH_SPEED, BASE_SPEED);
+}
+
+// Avanza 'mm' milimetros. Si frenar es false, deja los motores andando al terminar
+// (salvo que haya pared al frente: en ese caso frena de inmediato).
+void avanzarMm(int mm, bool frenar) {
+  long target = lroundf(mm * COUNTS_PER_MM);
+  resetCounts();
+  unsigned long t0 = millis();
+  bool bloqueado = false;
+
+  while (millis() - t0 < 4000) {
+    long posL = ENC_SIGN_L * getL();
+    long posR = ENC_SIGN_R * getR();
+    if ((posL + posR) / 2 >= target) break;
+
+    readSensors();
+    if (d[S_FRONT] < FRONT_STOP) { bloqueado = true; break; }
+
+    int corr = correccionLateral(posL - posR);
+    int v = velocidadAvance();
+    setMotors(v + corr, v - corr);
+  }
+
+  long recorrido = (ENC_SIGN_L * getL() + ENC_SIGN_R * getR()) / 2;
+  mmDesdeGiro += recorrido / COUNTS_PER_MM;
+
+  if (frenar || bloqueado) stopMotors();
+}
+
+void retrocederMm(int mm) {
+  long target = lroundf(mm * COUNTS_PER_MM);
+  resetCounts();
+  unsigned long t0 = millis();
+  while (millis() - t0 < 2000) {
+    long recorrido = -(ENC_SIGN_L * getL() + ENC_SIGN_R * getR()) / 2;
+    if (recorrido >= target) break;
+    setMotors(-APPROACH_SPEED, -APPROACH_SPEED);
+  }
+  stopMotors();
+  delay(100);
+}
+
+// Frena, mide y, si esta muy pegado a la pared, retrocede para tener espacio de giro
+void acomodarParaGiro() {
+  stopMotors();
+  delay(150);
+  readSensors();
+  readSensors();
+  if (DEBUG) {
+    Serial.print("frente al detenerse = ");
+    Serial.println(d[S_FRONT]);
+  }
+  if ((int)d[S_FRONT] < FRONT_TURN_MIN) {
+    retrocederMm(FRONT_TURN_MIN - (int)d[S_FRONT] + 10);
+  }
+}
+
+// =====================================================
+//  BOTON A
+// =====================================================
+void esperarBotonA() {
+  pinMode(BTN_A, INPUT_PULLUP);
+  Serial.print("Estado del boton A sin presionar = ");
+  Serial.println(digitalRead(BTN_A));       // debe ser 1 (HIGH)
+  Serial.println("Presiona el boton A para iniciar...");
+
+  while (digitalRead(BTN_A) == HIGH) delay(10);   // esperar a que lo presionen
+  delay(30);                                       // antirrebote
+  while (digitalRead(BTN_A) == LOW) delay(10);     // esperar a que lo suelten
+  Serial.println("Iniciando en 1.5 s...");
+  delay(1500);                                     // tiempo para quitar la mano
+}
+
+// =====================================================
+//  SETUP / LOOP
+// =====================================================
 void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000) {}
@@ -154,69 +357,63 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(R_A), isrR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_B), isrR, CHANGE);
 
-#if ENCODER_TEST
-  Serial.println("Encoder test: turn each wheel by hand.");
-  return;
-#endif
-
   Wire.begin();
   for (uint8_t i = 0; i < N; i++) {
     d[i] = 8190;
     canal(i);
     sensor[i].setTimeout(200);
     if (!sensor[i].init()) {
-      Serial.print("Sensor on channel ");
+      Serial.print("Sensor del canal ");
       Serial.print(i);
-      Serial.println(" FAILED. Stopping.");
+      Serial.println(" FALLO. Detenido.");
       while (true) delay(1000);
     }
     sensor[i].setMeasurementTimingBudget(20000);
     sensor[i].startContinuous();
   }
 
-  Serial.print("COUNTS_90 = ");
-  Serial.println(COUNTS_90);
-  Serial.println("Ready. Starting in 3 seconds...");
-  delay(3000);
+  Serial.print("Objetivo giro 90 = ");  Serial.print(objetivoCuentas(GIRO_GRADOS));
+  Serial.print("   giro 180 = ");       Serial.println(objetivoCuentas(GIRO_VUELTA));
+
+  esperarBotonA();
 }
 
 void loop() {
-#if ENCODER_TEST
-  Serial.print("L: ");
-  Serial.print(cntL);
-  Serial.print("\tR: ");
-  Serial.println(cntR);
-  delay(200);
-  return;
-#endif
-
   readSensors();
 
-  bool rightOpen    = d[S_RIGHT] > OPEN_SIDE;
-  bool frontBlocked = d[S_FRONT] < FRONT_STOP;
-  bool leftOpen     = d[S_LEFT]  > OPEN_SIDE;
+  bool derechaLibre = d[S_RIGHT] > OPEN_SIDE;
+  bool frenteBloq   = d[S_FRONT] < FRONT_STOP;
+  bool izqLibre     = d[S_LEFT]  > OPEN_SIDE;
+  bool puedeGirar   = mmDesdeGiro > MIN_MM_ENTRE_GIROS;
 
-  if (rightOpen && (millis() - lastTurn > COOLDOWN_MS)) {
-    forwardMm(ADVANCE_MM);
-    turnCounts(true, COUNTS_90);
-    forwardMm(ENTER_MM);
+  if (derechaLibre && (puedeGirar || frenteBloq)) {
+    avanzarMm(ADVANCE_MM, true);     // pasar la abertura con el eje de las ruedas
+    acomodarParaGiro();
+    girar(GIRO_GRADOS);              // 90 grados a la derecha
+    avanzarMm(ENTER_MM, false);      // entrar al nuevo pasillo
   }
-  else if (!frontBlocked) {
-    followRightWall();
+  else if (!frenteBloq) {
+    avanzarMm(STEP_MM, false);       // seguir recto
   }
-  else if (leftOpen) {
-    turnCounts(false, COUNTS_90);
+  else if (izqLibre) {
+    acomodarParaGiro();
+    girar(-GIRO_GRADOS);             // 90 grados a la izquierda
   }
   else {
-    turnCounts(true, COUNTS_180);
+    acomodarParaGiro();
+    girar(GIRO_VUELTA);              // callejon sin salida: 180 grados
   }
 
-  if (millis() - lastPrint > 200) {
+  if (DEBUG && millis() - lastPrint > 200) {
     lastPrint = millis();
     for (uint8_t i = 0; i < N; i++) {
+      Serial.print("C");
+      Serial.print(i);
+      Serial.print(": ");
       Serial.print(d[i]);
       Serial.print("\t");
     }
-    Serial.println();
+    Serial.print("corr=");
+    Serial.println(lastCorr);
   }
 }

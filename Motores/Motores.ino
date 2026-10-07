@@ -34,7 +34,7 @@ long getR() { noInterrupts(); long v = cntR; interrupts(); return v; }
 // =====================================================
 //  PARAMETROS AJUSTABLES (edita aqui y vuelve a subir)
 // =====================================================
-const float ANGULO_GRADOS = -90.0;   // + derecha, - izquierda
+const float ANGULO_GRADOS = 90.0;   // + derecha, - izquierda
 const bool  ALTERNAR      = false;  // true: alterna derecha/izquierda
 const int   PAUSA_MS      = 800;    // pausa entre giros
 
