@@ -7,6 +7,12 @@ struct PIDState {
   float velF = 0;
 };
 
+struct LogEntry {
+  uint32_t t;
+  uint8_t  accPrev, accFinal, flags;
+  uint16_t izq, fre, der, rawI, rawF, rawD;
+};
+
 // ---------- Pines de motores ----------
 const int R_PWM = 14, R_DIR = 10;
 const int L_PWM = 15, L_DIR = 11;
@@ -67,7 +73,6 @@ const int   I_ZONE     = 15;
 const float I_MAX      = 15.0;
 const unsigned long DT_US = 10000;
 
-// Refuerzo anti-atoramiento
 const int STUCK_CYCLES = 5;
 const int BOOST_STEP   = 4;
 const int BOOST_MAX    = 30;
@@ -78,69 +83,78 @@ const int BOOST_MAX    = 30;
 const float GIRO_GRADOS = 90.0;
 const float GIRO_VUELTA = 180.0;
 
-// ---- Velocidades ----
+// true: si el frente esta libre avanza (tu tabla de situaciones)
+// false: mano derecha pura (si la derecha esta libre, gira)
+const bool FRENTE_PRIMERO = true;
+
 const int BASE_SPEED     = 80;
-const int APPROACH_SPEED = 60;     // velocidad al acercarse al frente (> zona muerta)
+const int APPROACH_SPEED = 60;
 
-// ---- Umbrales (calibrados con tus lecturas) ----
-const int WALL_BELOW = 170;        // lateral menor que esto = pared
-const int OPEN_ABOVE = 260;        // lateral mayor que esto = abertura (entre ambos mantiene el estado)
-const int FRONT_STOP = 125;        // frente menor que esto = bloqueado
-const int SLOW_DIST  = 170;        // empieza a frenar a esta distancia del frente
-const int FRONT_TURN_MIN = 70;     // si esta mas cerca que esto antes de girar, retrocede
+const int WALL_BELOW = 170;
+const int OPEN_ABOVE = 260;
+const int FRONT_STOP = 125;
+const int SLOW_DIST  = 170;
+const int FRONT_TURN_MIN = 70;
 
-// ---- Referencias con el robot centrado (tus lecturas) ----
-const int REF_RIGHT = 103;         // C0 centrado
-const int REF_LEFT  = 115;         // C4 centrado
+const int REF_RIGHT = 103;
+const int REF_LEFT  = 115;
 
-// ---- Centrado en cascada (suave) ----
-const int   WALL_SIGN    = 1;      // pon -1 si empuja hacia la pared
-const float KP_LAT       = 0.30;   // cuentas de rumbo objetivo por mm de error
-const int   LAT_DEAD     = 6;      // zona muerta (mm)
-const int   YAW_MAX      = 10;     // rumbo objetivo maximo (cuentas; 1 cuenta = 0.37 grados)
-const float YAW_SLEW     = 0.05;   // cambio maximo del rumbo objetivo por ciclo de 5 ms
-const float KP_YAW       = 2.0;    // PWM por cuenta de error de rumbo
-const int   CORR_MAX     = 14;     // limite de correccion (PWM)
-const int   FREEZE_FRONT = 220;    // con el frente mas cerca que esto no se centra
+const int   WALL_SIGN    = 1;
+const float KP_LAT       = 0.30;
+const int   LAT_DEAD     = 6;
+const int   YAW_MAX      = 10;
+const float YAW_SLEW     = 0.05;
+const float KP_YAW       = 2.0;
+const int   CORR_MAX     = 14;
+const int   FREEZE_FRONT = 220;
 
-// ---- Frenado ----
-const int BRAKE_PWM = 70;          // pulso de freno en reversa
-const int BRAKE_MS  = 20;          // 0 = sin pulso de freno
+const int BRAKE_PWM = 70;
+const int BRAKE_MS  = 20;
 
-// ---- Distancias ----
-const int STEP_MM    = 20;         // avance por ciclo de decision
-const int ADVANCE_MM = 100;        // avance tras detectar abertura (ver nota de ajuste)
-const int ENTER_MM   = 30;         // avance despues de girar
-const int MIN_MM_ENTRE_GIROS = 60;
+const int STEP_MM    = 20;
+const int ADVANCE_MM = 100;
+const int ENTER_MM   = 30;
+const int MIN_MM_ENTRE_GIROS = 60;   // solo en modo mano derecha
 
-const unsigned long LOOP_US = 5000;   // lazo de avance: 5 ms
+const unsigned long LOOP_US = 5000;
 
-// ---- Filtro de sensores ----
-const uint16_t INVALID_MM  = 1500; // lecturas >= esto se consideran invalidas
-const uint8_t  INVALID_MAX = 4;    // tras tantas invalidas seguidas se acepta como "lejos"
+const uint16_t INVALID_MM  = 1500;
+const uint8_t  INVALID_MAX = 4;
 const uint16_t FAR_MM      = 1200;
 
-const bool DEBUG = true;
+const bool DEBUG = false;            // true solo si corres con el cable conectado
 const bool READ_DIAGONALS = false;
+
+// Acciones
+const int ACC_AVANZAR   = 0;
+const int ACC_DERECHA   = 1;
+const int ACC_IZQUIERDA = 2;
+const int ACC_VUELTA    = 3;
 
 // ---------- Sensores ----------
 const uint8_t MUX_ADDR = 0x70;
 const uint8_t N = 5;
 enum { S_LEFT = 4, S_FL = 3, S_FRONT = 2, S_FR = 1, S_RIGHT = 0 };
 VL53L0X sensor[N];
-uint16_t d[N];                     // valor filtrado (mediana de 3)
+uint16_t d[N];                       // valor filtrado (mediana de 3)
+uint16_t raw[N];                     // ultima lectura cruda
 uint16_t hist[N][3];
 uint8_t  hIdx[N];
 uint8_t  invCnt[N];
-bool wallR = true, wallL = true;   // con histeresis
+bool wallR = true, wallL = true;     // con histeresis
 
 // ---------- Estado ----------
 float mmDesdeGiro = 0;
-long  yawBase = 0;                 // rumbo acumulado desde el ultimo giro (cuentas L-R)
-float yawTarget = 0;               // rumbo objetivo (cuentas)
+long  yawBase = 0;
+float yawTarget = 0;
 float eFilt = 0;
 int   modoPrev = -1;
 unsigned long lastPrint = 0;
+
+// ---------- Caja negra ----------
+const int LOG_N = 40;
+LogEntry logBuf[LOG_N];
+int logHead = 0, logCount = 0;
 
 // =====================================================
 //  MULTIPLEXOR Y SENSORES
@@ -162,6 +176,7 @@ uint16_t mediana3(uint16_t a, uint16_t b, uint16_t c) {
 }
 
 void guardarLectura(uint8_t i, uint16_t v) {
+  raw[i] = v;                              // guarda la lectura cruda para la caja negra
   if (v >= INVALID_MM) {
     if (invCnt[i] < 255) invCnt[i]++;
     if (invCnt[i] < INVALID_MAX) return;   // ignora: conserva el valor anterior
@@ -193,7 +208,7 @@ void readSensors() {
   actualizarParedes();
 }
 
-// Lectura BLOQUEANTE: espera datos nuevos (setup y despues de girar).
+// Lectura BLOQUEANTE: espera datos nuevos (setup, antes y despues de girar).
 void readSensorsBlocking() {
   for (uint8_t i = 0; i < N; i++) {
     if (!sensorUsado(i)) continue;
@@ -225,7 +240,6 @@ void frenarMotores() {
   stopMotors();
 }
 
-// Avance con correccion; ninguna rueda baja de MIN_PWM (si no, se atora)
 void avance(int v, int corr) {
   int l = max(v + corr, MIN_PWM);
   int r = max(v - corr, MIN_PWM);
@@ -340,7 +354,7 @@ void girar(float grados) {
   delay(50);
   for (int k = 0; k < 3; k++) readSensorsBlocking();
   mmDesdeGiro = 0;
-  yawBase = 0;         // despues de un giro, el rumbo vuelve a ser la referencia
+  yawBase = 0;
   yawTarget = 0;
   eFilt = 0;
   modoPrev = -1;
@@ -349,8 +363,6 @@ void girar(float grados) {
 // =====================================================
 //  AVANCE RECTO CON CENTRADO EN CASCADA
 // =====================================================
-// Calcula el rumbo objetivo (cuentas) a partir de la distancia a las paredes.
-//  + = girar un poco a la derecha. Si 'activo' es false, el rumbo objetivo vuelve a 0.
 void actualizarRumboObjetivo(bool activo) {
   float deseado = 0;
 
@@ -362,14 +374,14 @@ void actualizarRumboObjetivo(bool activo) {
       e = (((int)d[S_RIGHT] - REF_RIGHT) - ((int)d[S_LEFT] - REF_LEFT)) / 2.0f;
     } else if (wallR) {
       modo = 1;
-      e = (int)d[S_RIGHT] - REF_RIGHT;      // + = lejos de la pared derecha
+      e = (int)d[S_RIGHT] - REF_RIGHT;
     } else {
       modo = 2;
-      e = REF_LEFT - (int)d[S_LEFT];        // + = cerca de la pared izquierda
+      e = REF_LEFT - (int)d[S_LEFT];
     }
     e = constrain(e, -60.0f, 60.0f);
 
-    if (modo != modoPrev) {                  // cambio de modo: evita saltos
+    if (modo != modoPrev) {
       eFilt = e;
       modoPrev = modo;
     } else {
@@ -386,7 +398,6 @@ void actualizarRumboObjetivo(bool activo) {
     modoPrev = -1;
   }
 
-  // El rumbo objetivo cambia despacio
   if (deseado > yawTarget + YAW_SLEW)      yawTarget += YAW_SLEW;
   else if (deseado < yawTarget - YAW_SLEW) yawTarget -= YAW_SLEW;
   else                                      yawTarget = deseado;
@@ -399,9 +410,6 @@ int velocidadAvance() {
   return (int)map(f, FRONT_STOP, SLOW_DIST, APPROACH_SPEED, BASE_SPEED);
 }
 
-// Avanza 'mm' milimetros.
-//  frenar: detener los motores al terminar.
-//  centrar: usar las paredes para centrarse (false = solo mantener el rumbo con encoders).
 void avanzarMm(int mm, bool frenar, bool centrar) {
   long target = lroundf(mm * COUNTS_PER_MM);
   resetCounts();
@@ -421,10 +429,10 @@ void avanzarMm(int mm, bool frenar, bool centrar) {
     readSensors();
     if (d[S_FRONT] < FRONT_STOP) { bloqueado = true; break; }
 
-    long yaw = yawBase + (posL - posR);      // rumbo actual (cuentas)
+    long yaw = yawBase + (posL - posR);
     actualizarRumboObjetivo(centrar && (int)d[S_FRONT] > FREEZE_FRONT);
 
-    float c = KP_YAW * (yawTarget - yaw);    // + = girar a la derecha
+    float c = KP_YAW * (yawTarget - yaw);
     int corr = (int)constrain(c, -(float)CORR_MAX, (float)CORR_MAX);
     avance(velocidadAvance(), corr);
   }
@@ -450,7 +458,7 @@ void retrocederMm(int mm) {
   delay(100);
 }
 
-// Frena, mide y, si esta muy pegado a la pared, retrocede para tener espacio de giro
+// Frena, toma lecturas frescas y, si esta muy pegado a la pared, retrocede
 void acomodarParaGiro() {
   stopMotors();
   delay(120);
@@ -461,7 +469,73 @@ void acomodarParaGiro() {
   }
   if ((int)d[S_FRONT] < FRONT_TURN_MIN) {
     retrocederMm(FRONT_TURN_MIN - (int)d[S_FRONT] + 10);
+    for (int k = 0; k < 3; k++) readSensorsBlocking();
   }
+}
+
+// =====================================================
+//  DECISION
+// =====================================================
+int decidir() {
+  bool frenteBloq   = d[S_FRONT] < FRONT_STOP;
+  bool derechaLibre = !wallR;
+  bool izqLibre     = !wallL;
+
+  if (FRENTE_PRIMERO) {
+    if (!frenteBloq)  return ACC_AVANZAR;
+    if (derechaLibre) return ACC_DERECHA;
+    if (izqLibre)     return ACC_IZQUIERDA;
+    return ACC_VUELTA;
+  }
+  if (derechaLibre) return ACC_DERECHA;
+  if (!frenteBloq)  return ACC_AVANZAR;
+  if (izqLibre)     return ACC_IZQUIERDA;
+  return ACC_VUELTA;
+}
+
+const char* nombreAccion(int a) {
+  switch (a) {
+    case ACC_AVANZAR:   return "AVANZAR";
+    case ACC_DERECHA:   return "DERECHA";
+    case ACC_IZQUIERDA: return "IZQUIERDA";
+    default:            return "VUELTA";
+  }
+}
+
+// =====================================================
+//  CAJA NEGRA
+// =====================================================
+void registrarLog(int accPrev, int accFinal) {
+  LogEntry &e = logBuf[logHead];
+  e.t        = millis();
+  e.accPrev  = accPrev;
+  e.accFinal = accFinal;
+  e.flags    = (wallR ? 1 : 0) | (wallL ? 2 : 0);
+  e.izq = d[S_LEFT];  e.fre = d[S_FRONT];  e.der = d[S_RIGHT];
+  e.rawI = raw[S_LEFT]; e.rawF = raw[S_FRONT]; e.rawD = raw[S_RIGHT];
+  logHead = (logHead + 1) % LOG_N;
+  if (logCount < LOG_N) logCount++;
+}
+
+void volcarLog() {
+  Serial.println("---- REGISTRO DE DECISIONES (mas antiguo primero) ----");
+  int start = (logCount < LOG_N) ? 0 : logHead;
+  for (int k = 0; k < logCount; k++) {
+    LogEntry &e = logBuf[(start + k) % LOG_N];
+    Serial.print(e.t);
+    Serial.print(" ms  previsto=");  Serial.print(nombreAccion(e.accPrev));
+    Serial.print("  final=");        Serial.print(nombreAccion(e.accFinal));
+    if (e.accPrev != e.accFinal) Serial.print("  <-- CAMBIO");
+    Serial.print("   filtrado izq=");  Serial.print(e.izq);
+    Serial.print(" fre=");             Serial.print(e.fre);
+    Serial.print(" der=");             Serial.print(e.der);
+    Serial.print("   crudo izq=");     Serial.print(e.rawI);
+    Serial.print(" fre=");             Serial.print(e.rawF);
+    Serial.print(" der=");             Serial.print(e.rawD);
+    Serial.print("   paredD=");        Serial.print(e.flags & 1);
+    Serial.print(" paredI=");          Serial.println((e.flags >> 1) & 1);
+  }
+  Serial.println("------------------------------------------------------");
 }
 
 // =====================================================
@@ -478,6 +552,26 @@ void esperarBotonA() {
   while (digitalRead(BTN_A) == LOW) delay(10);
   Serial.println("Iniciando en 1.5 s...");
   delay(1500);
+}
+
+bool botonPulsado() {
+  static bool prev = false;
+  bool ahora = (digitalRead(BTN_A) == LOW);
+  bool flanco = ahora && !prev;
+  prev = ahora;
+  if (flanco) delay(30);
+  return flanco;
+}
+
+// Durante la marcha: A pausa, vuelca el registro y espera A para continuar
+void pausaYVolcarLog() {
+  stopMotors();
+  while (digitalRead(BTN_A) == LOW) delay(10);   // espera a que suelte
+  delay(200);
+  Serial.println(">> PAUSA");
+  volcarLog();
+  Serial.println(">> Pulsa A para continuar...");
+  esperarBotonA();
 }
 
 // =====================================================
@@ -505,6 +599,7 @@ void setup() {
 
   for (uint8_t i = 0; i < N; i++) {
     d[i] = FAR_MM;
+    raw[i] = FAR_MM;
     hIdx[i] = 0;
     invCnt[i] = 0;
     for (uint8_t k = 0; k < 3; k++) hist[i][k] = FAR_MM;
@@ -525,34 +620,50 @@ void setup() {
 
   Serial.print("Objetivo giro 90 = ");  Serial.print(objetivoCuentas(GIRO_GRADOS));
   Serial.print("   giro 180 = ");       Serial.println(objetivoCuentas(GIRO_VUELTA));
+  Serial.print("FRENTE_PRIMERO = ");    Serial.println(FRENTE_PRIMERO ? "true" : "false");
+  Serial.println("Durante la marcha, A pausa y vuelca el registro.");
 
   esperarBotonA();
 }
 
 void loop() {
+  if (botonPulsado()) pausaYVolcarLog();
+
   readSensors();
+  bool frenteBloq = d[S_FRONT] < FRONT_STOP;
+  int acc = decidir();
 
-  bool derechaLibre = !wallR;
-  bool izqLibre     = !wallL;
-  bool frenteBloq   = d[S_FRONT] < FRONT_STOP;
-  bool puedeGirar   = mmDesdeGiro > MIN_MM_ENTRE_GIROS;
+  // Modo mano derecha: ignora una abertura a la derecha recien despues de un giro
+  if (!FRENTE_PRIMERO && acc == ACC_DERECHA && !frenteBloq && mmDesdeGiro <= MIN_MM_ENTRE_GIROS) {
+    acc = ACC_AVANZAR;
+  }
 
-  if (derechaLibre && (puedeGirar || frenteBloq)) {
-    avanzarMm(ADVANCE_MM, true, false);   // centrar el eje en la abertura, sin centrado lateral
-    acomodarParaGiro();
-    girar(GIRO_GRADOS);                   // 90 grados a la derecha
-    avanzarMm(ENTER_MM, false, false);    // entrar derecho al nuevo pasillo
-  }
-  else if (!frenteBloq) {
-    avanzarMm(STEP_MM, false, true);      // seguir recto, centrandose
-  }
-  else if (izqLibre) {
-    acomodarParaGiro();
-    girar(-GIRO_GRADOS);                  // 90 grados a la izquierda
-  }
-  else {
-    acomodarParaGiro();
-    girar(GIRO_VUELTA);                   // callejon sin salida: 180 grados
+  if (acc == ACC_AVANZAR) {
+    avanzarMm(STEP_MM, false, true);            // seguir recto, centrandose
+  } else {
+    // Abertura a la derecha con el frente libre (solo mano derecha): centrar el eje
+    if (acc == ACC_DERECHA && !frenteBloq) {
+      avanzarMm(ADVANCE_MM, true, false);
+    }
+
+    acomodarParaGiro();                         // quieto, lecturas frescas
+    int fin = decidir();                        // vuelve a decidir con el robot quieto
+    registrarLog(acc, fin);
+
+    switch (fin) {
+      case ACC_DERECHA:
+        girar(GIRO_GRADOS);
+        avanzarMm(ENTER_MM, false, false);
+        break;
+      case ACC_IZQUIERDA:
+        girar(-GIRO_GRADOS);
+        break;
+      case ACC_VUELTA:
+        girar(GIRO_VUELTA);
+        break;
+      default:
+        break;                                  // falsa alarma: no gira, sigue
+    }
   }
 
   if (DEBUG && millis() - lastPrint > 200) {
