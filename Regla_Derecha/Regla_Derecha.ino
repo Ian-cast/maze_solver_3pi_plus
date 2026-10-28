@@ -76,13 +76,13 @@ const float GIRO_GRADOS = 90.0;
 const float GIRO_VUELTA = 180.0;
 
 const int BASE_SPEED     = 80;
-const int APPROACH_SPEED = 50;
+const int APPROACH_SPEED = 50;       // velocidad al llegar a FRONT_STOP (debe ser > MIN_PWM)
 
 // Umbrales de sensores (mm)
 const int WALL_BELOW = 170;          // lateral menor que esto = pared
 const int OPEN_ABOVE = 260;          // lateral mayor que esto = abertura
 const int FRONT_STOP = 125;          // frente menor que esto = bloqueado
-const int SLOW_DIST  = 250;          // empieza a frenar al acercarse al frente
+const int SLOW_DIST  = 300;          // empieza a frenar al acercarse al frente
 const int FRONT_TURN_MIN = 70;       // si esta mas cerca antes de girar, retrocede
 
 // Distancias con el robot centrado (mm)
@@ -105,9 +105,9 @@ const int BRAKE_MS  = 20;
 
 // Distancias de movimiento
 const int STEP_MM    = 20;           // avance por ciclo de decision
-const int ADVANCE_MM = 100;          // avance antes de girar a la derecha con el frente libre
-const int ENTER_MM   = 110;          // avance despues de girar a la derecha
-const int MIN_MM_ENTRE_GIROS = 60;   // ignora una abertura a la derecha justo despues de un giro
+const int ADVANCE_MM = 100;          // avance antes de girar a la izquierda con el frente libre
+const int ENTER_MM   = 110;          // avance despues de girar a la izquierda
+const int MIN_MM_ENTRE_GIROS = 60;   // ignora una abertura a la izquierda justo despues de un giro
 
 const unsigned long LOOP_US = 5000;
 
@@ -438,12 +438,12 @@ void acomodarParaGiro() {
 }
 
 // =====================================================
-//  REGLA DE LA MANO DERECHA
+//  REGLA DE LA MANO IZQUIERDA
 // =====================================================
 int decidir() {
-  if (!wallR)                    return ACC_DERECHA;
-  if (d[S_FRONT] >= FRONT_STOP)  return ACC_AVANZAR;
   if (!wallL)                    return ACC_IZQUIERDA;
+  if (d[S_FRONT] >= FRONT_STOP)  return ACC_AVANZAR;
+  if (!wallR)                    return ACC_DERECHA;
   return ACC_VUELTA;
 }
 
@@ -507,8 +507,8 @@ void loop() {
   int acc = decidir();
   bool frenteBloq = d[S_FRONT] < FRONT_STOP;
 
-  // Ignora una abertura a la derecha recien despues de un giro
-  if (acc == ACC_DERECHA && !frenteBloq && mmDesdeGiro <= MIN_MM_ENTRE_GIROS) {
+  // Ignora una abertura a la izquierda recien despues de un giro
+  if (acc == ACC_IZQUIERDA && !frenteBloq && mmDesdeGiro <= MIN_MM_ENTRE_GIROS) {
     acc = ACC_AVANZAR;
   }
 
@@ -517,8 +517,8 @@ void loop() {
     return;
   }
 
-  // Abertura a la derecha con el frente libre: centrar el eje en la abertura
-  if (acc == ACC_DERECHA && !frenteBloq) {
+  // Abertura a la izquierda con el frente libre: centrar el eje en la abertura
+  if (acc == ACC_IZQUIERDA && !frenteBloq) {
     avanzarMm(ADVANCE_MM, true, false);
   }
 
@@ -526,12 +526,12 @@ void loop() {
   int fin = decidir();                       // vuelve a decidir con el robot quieto
 
   switch (fin) {
-    case ACC_DERECHA:
-      girar(GIRO_GRADOS);
-      avanzarMm(ENTER_MM, false, false);
-      break;
     case ACC_IZQUIERDA:
       girar(-GIRO_GRADOS);
+      avanzarMm(ENTER_MM, false, false);     // entra al nuevo pasillo antes de decidir otra vez
+      break;
+    case ACC_DERECHA:
+      girar(GIRO_GRADOS);
       break;
     case ACC_VUELTA:
       girar(GIRO_VUELTA);
