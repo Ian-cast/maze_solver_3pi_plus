@@ -76,13 +76,13 @@ const float GIRO_GRADOS = 90.0;
 const float GIRO_VUELTA = 180.0;
 
 const int BASE_SPEED     = 80;
-const int APPROACH_SPEED = 60;
+const int APPROACH_SPEED = 50;
 
 // Umbrales de sensores (mm)
 const int WALL_BELOW = 170;          // lateral menor que esto = pared
 const int OPEN_ABOVE = 260;          // lateral mayor que esto = abertura
 const int FRONT_STOP = 125;          // frente menor que esto = bloqueado
-const int SLOW_DIST  = 170;          // empieza a frenar al acercarse al frente
+const int SLOW_DIST  = 250;          // empieza a frenar al acercarse al frente
 const int FRONT_TURN_MIN = 70;       // si esta mas cerca antes de girar, retrocede
 
 // Distancias con el robot centrado (mm)
